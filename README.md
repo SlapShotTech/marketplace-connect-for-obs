@@ -15,11 +15,9 @@ Add and share OBS setups in just a few clicks — with the Marketplace Connect p
 
 To build the plugin locally, you will need the following installed.
 
--   Windows 10, or higher
--   Visual Studio 17 2022
+-   Windows 10 or higher **or** macOS 11 (Big Sur) or higher
+-   Visual Studio 17 2022 on Windows, or Xcode 15 on macOS
 -   CMake 3.30.5
-
-Please note, Marketplace Connect for OBS is currently only available on Windows.
 
 > [!NOTE]
 > The plugin uses the OBS plugin template. For more information, please refer to the [OBS Project's wiki](https://github.com/obsproject/obs-plugintemplate/wiki).
@@ -28,10 +26,17 @@ Please note, Marketplace Connect for OBS is currently only available on Windows.
 
 Once all system requirements are installed, follow these steps to build the project and get started with developing.
 
+### Windows
+
 1. In the project's root folder, run `cmake --preset windows-x64` — this will download the build dependencies and set up a Visual Studio project file in the `build_x64` directory.
 2. Open `build_x64/elgato-marketpalce-connect.sln` within Visual Studio to edit and build the project.
 
 Alternatively, `cmake` can build the project directly with the command `cmake --build --preset windows-x64`.
+
+### macOS
+
+1. In the project's root folder, run `cmake --preset macos` — this will download the build dependencies and configure an Xcode project in the `build_macos` directory.
+2. Open `build_macos/elgato-marketpalce-connect.xcodeproj` in Xcode to edit and build the project, or build directly from the command line with `cmake --build --preset macos`.
 
 ## Further Reading
 
