@@ -29,6 +29,17 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <direct.h>
 #include <windows.h>
 #include <io.h>
+#elif defined(__APPLE__)
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <filesystem>
+#include <system_error>
 #endif
 
 #include "util.h"
@@ -100,24 +111,38 @@ static TString makeLongPath(const std::string &str)
 bool is_symlink(std::string path)
 {
 #ifdef WIN32
-	// TODO: Use lstat on Mac
-	TString tpath = makeLongPath(path);
-	auto attributes = GetFileAttributes(tpath.c_str());
-	return attributes != INVALID_FILE_ATTRIBUTES &&
-	       0 != (attributes & FILE_ATTRIBUTE_REPARSE_POINT);
+        // TODO: Use lstat on Mac
+        TString tpath = makeLongPath(path);
+        auto attributes = GetFileAttributes(tpath.c_str());
+        return attributes != INVALID_FILE_ATTRIBUTES &&
+               0 != (attributes & FILE_ATTRIBUTE_REPARSE_POINT);
+#elif defined(__APPLE__)
+        struct stat info;
+        if (lstat(path.c_str(), &info) != 0) {
+                return false;
+        }
+        return S_ISLNK(info.st_mode);
 #endif
+        return false;
 }
 
 bool is_directory(std::string path)
 {
 #ifdef WIN32
-	// TODO: Use lstat on Mac
-	TString tpath = makeLongPath(path);
+        // TODO: Use lstat on Mac
+        TString tpath = makeLongPath(path);
 
-	auto attributes = GetFileAttributes(tpath.c_str());
-	return attributes != INVALID_FILE_ATTRIBUTES &&
-	       0 != (attributes & FILE_ATTRIBUTE_DIRECTORY);
+        auto attributes = GetFileAttributes(tpath.c_str());
+        return attributes != INVALID_FILE_ATTRIBUTES &&
+               0 != (attributes & FILE_ATTRIBUTE_DIRECTORY);
+#elif defined(__APPLE__)
+        struct stat info;
+        if (stat(path.c_str(), &info) != 0) {
+                return false;
+        }
+        return S_ISDIR(info.st_mode);
 #endif
+        return false;
 }
 
 std::string get_plugin_data_path()
@@ -138,8 +163,18 @@ std::string get_plugin_data_path()
 		appdata_path += "/obs-studio/plugins";
 	}
 
-	return appdata_path;
+        return appdata_path;
+#elif defined(__APPLE__)
+        const char *home = getenv("HOME");
+        if (!home) {
+                return "";
+        }
+
+        std::string basePath = home;
+        basePath += "/Library/Application Support/obs-studio/plugins";
+        return basePath;
 #endif
+        return "";
 }
 
 // Case insensitive path prefix matching on Windows. Simple char-wise compare on other platforms.
@@ -172,77 +207,182 @@ bool path_begins_with(const std::string &haystack, const std::string &needle)
 
 // Just blindly listens on a named pipe waiting for a string, and submits it to the callback
 bool listen_on_pipe(const std::string &pipe_name,
-		    std::function<void(std::string)> callback)
+                    std::function<void(std::string)> callback)
 {
-	int pipe_number = 0;
-	std::string base_name = "\\\\.\\pipe\\" + pipe_name;
-	std::string attempt_name;
-	while (true) {
+#ifdef WIN32
+        int pipe_number = 0;
+        std::string base_name = "\\\\.\\pipe\\" + pipe_name;
+        std::string attempt_name;
+        while (true) {
 
-		obs_log(LOG_INFO, "Creating pipe...");
-		HANDLE pipe = INVALID_HANDLE_VALUE;
+                obs_log(LOG_INFO, "Creating pipe...");
+                HANDLE pipe = INVALID_HANDLE_VALUE;
 
-		SECURITY_ATTRIBUTES sa;
-		SECURITY_DESCRIPTOR sd;
-		InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
-		SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
-		sa.nLength = sizeof(sa);
-		sa.lpSecurityDescriptor = &sd;
-		sa.bInheritHandle = FALSE;
+                SECURITY_ATTRIBUTES sa;
+                SECURITY_DESCRIPTOR sd;
+                InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+                SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
+                sa.nLength = sizeof(sa);
+                sa.lpSecurityDescriptor = &sd;
+                sa.bInheritHandle = FALSE;
 
-		while (pipe_number < 10) {
-			attempt_name = base_name + std::to_string(pipe_number);
-			pipe = CreateNamedPipeA(
-				attempt_name.c_str(),
-				PIPE_ACCESS_DUPLEX,
-				PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-				PIPE_UNLIMITED_INSTANCES,
-				512, 512,
-				0,
-				&sa
-			);
-			if (pipe != INVALID_HANDLE_VALUE) {
-				break;
-			}
-			pipe_number++;
-		}
-		if (pipe == INVALID_HANDLE_VALUE) {
-			obs_log(LOG_ERROR, "Could not open named pipe!");
-			return false;
-		}
+                while (pipe_number < 10) {
+                        attempt_name = base_name + std::to_string(pipe_number);
+                        pipe = CreateNamedPipeA(
+                                attempt_name.c_str(),
+                                PIPE_ACCESS_DUPLEX,
+                                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                                PIPE_UNLIMITED_INSTANCES,
+                                512, 512,
+                                0,
+                                &sa);
+                        if (pipe != INVALID_HANDLE_VALUE) {
+                                break;
+                        }
+                        pipe_number++;
+                }
+                if (pipe == INVALID_HANDLE_VALUE) {
+                        obs_log(LOG_ERROR, "Could not open named pipe!");
+                        return false;
+                }
 
-		Sleep(100);
-		obs_log(LOG_INFO, "Connecting... to %s", attempt_name.c_str());
-		bool connected = ConnectNamedPipe(pipe, NULL);
-		if (!connected && GetLastError() == ERROR_PIPE_CONNECTED) {
-			connected = true;
-		}
+                Sleep(100);
+                obs_log(LOG_INFO, "Connecting... to %s", attempt_name.c_str());
+                bool connected = ConnectNamedPipe(pipe, NULL);
+                if (!connected && GetLastError() == ERROR_PIPE_CONNECTED) {
+                        connected = true;
+                }
 
-		std::string buffer;
+                std::string buffer;
 
-		if (connected) {
-			obs_log(LOG_INFO, "Connected to %s",
-				attempt_name.c_str());
-			while (true) {
-				buffer.resize(2048);
-				DWORD read_count = 0;
-				obs_log(LOG_INFO, "Reading");
-				auto status = ReadFile(pipe, &buffer[0],
-						       (DWORD)buffer.size(),
-						       &read_count, NULL);
-				if (!status || read_count == 0) {
-					obs_log(LOG_INFO, "Failed to read");
-					break;
-				}
-				buffer.resize(read_count);
-				callback(buffer);
-			}
-		}
-		CloseHandle(pipe);
-		obs_log(LOG_INFO, "Restarting");
-	}
+                if (connected) {
+                        obs_log(LOG_INFO, "Connected to %s",
+                                attempt_name.c_str());
+                        while (true) {
+                                buffer.resize(2048);
+                                DWORD read_count = 0;
+                                obs_log(LOG_INFO, "Reading");
+                                auto status = ReadFile(pipe, &buffer[0],
+                                                       (DWORD)buffer.size(),
+                                                       &read_count, NULL);
+                                if (!status || read_count == 0) {
+                                        obs_log(LOG_INFO, "Failed to read");
+                                        break;
+                                }
+                                buffer.resize(read_count);
+                                callback(buffer);
+                        }
+                }
+                CloseHandle(pipe);
+                obs_log(LOG_INFO, "Restarting");
+        }
 
-	obs_log(LOG_INFO, "Ended");
+        obs_log(LOG_INFO, "Ended");
+        return true;
+#elif defined(__APPLE__)
+        const std::string base_name = "/tmp/" + pipe_name;
+        std::string attempt_name;
+
+        while (true) {
+                int server_fd = -1;
+                int pipe_number = 0;
+
+                obs_log(LOG_INFO, "Creating unix domain socket...");
+
+                while (pipe_number < 10) {
+                        attempt_name = base_name + std::to_string(pipe_number);
+
+                        server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+                        if (server_fd < 0) {
+                                obs_log(LOG_ERROR,
+                                        "Failed to create socket for %s: %s",
+                                        attempt_name.c_str(),
+                                        strerror(errno));
+                                return false;
+                        }
+
+                        sockaddr_un addr = {};
+                        addr.sun_family = AF_UNIX;
+                        std::strncpy(addr.sun_path, attempt_name.c_str(),
+                                     sizeof(addr.sun_path) - 1);
+
+                        unlink(attempt_name.c_str());
+
+                        if (bind(server_fd,
+                                 reinterpret_cast<sockaddr *>(&addr),
+                                 sizeof(addr)) == 0) {
+                                break;
+                        }
+
+                        close(server_fd);
+                        server_fd = -1;
+                        ++pipe_number;
+                }
+
+                if (server_fd < 0) {
+                        obs_log(LOG_ERROR,
+                                "Could not bind to any socket for %s",
+                                pipe_name.c_str());
+                        return false;
+                }
+
+                if (listen(server_fd, 1) < 0) {
+                        obs_log(LOG_ERROR,
+                                "Failed to listen on socket %s: %s",
+                                attempt_name.c_str(), strerror(errno));
+                        close(server_fd);
+                        unlink(attempt_name.c_str());
+                        return false;
+                }
+
+                while (true) {
+                        int client_fd = accept(server_fd, nullptr, nullptr);
+                        if (client_fd < 0) {
+                                if (errno == EINTR) {
+                                        continue;
+                                }
+                                obs_log(LOG_ERROR,
+                                        "Failed to accept client on %s: %s",
+                                        attempt_name.c_str(),
+                                        strerror(errno));
+                                break;
+                        }
+
+                        std::string data;
+                        data.reserve(2048);
+
+                        while (true) {
+                                char buffer[2048];
+                                ssize_t read_count = read(client_fd, buffer,
+                                                          sizeof(buffer));
+                                if (read_count > 0) {
+                                        data.append(buffer,
+                                                    static_cast<size_t>(read_count));
+                                        continue;
+                                }
+
+                                if (!data.empty()) {
+                                        callback(data);
+                                }
+
+                                if (read_count == 0 || errno != EINTR) {
+                                        break;
+                                }
+                        }
+
+                        close(client_fd);
+                }
+
+                close(server_fd);
+                unlink(attempt_name.c_str());
+        }
+
+        return true;
+#else
+        (void)pipe_name;
+        (void)callback;
+        return false;
+#endif
 }
 
 FILE *open_tmp_file(const char *mode, std::string &outFilename)
@@ -300,21 +440,91 @@ FILE *open_tmp_file(const char *mode, std::string &outFilename)
 	outFilename = tpath;
 #endif
 
-	return fdopen(fhandle, mode);
+        return fdopen(fhandle, mode);
+#elif defined(__APPLE__)
+        const char *tmpDir = getenv("TMPDIR");
+        std::string baseDir = tmpDir && tmpDir[0] ? tmpDir : "/tmp";
+
+        if (baseDir.back() != '/') {
+                baseDir += '/';
+        }
+
+        std::string pattern = baseDir + fname + "XXXXXX";
+        std::vector<char> templ(pattern.begin(), pattern.end());
+        templ.push_back('\0');
+
+        int fd = mkstemp(templ.data());
+        if (fd == -1) {
+                obs_log(LOG_ERROR, "Failed to create temp file: %s",
+                        strerror(errno));
+                return nullptr;
+        }
+
+        outFilename.assign(templ.data());
+
+        FILE *file = fdopen(fd, mode);
+        if (!file) {
+                close(fd);
+                unlink(templ.data());
+                obs_log(LOG_ERROR,
+                        "Failed to associate file descriptor with FILE*: %s",
+                        strerror(errno));
+                return nullptr;
+        }
+
+        return file;
 #else
-	// TODO: Mac
+        (void)mode;
+        (void)outFilename;
+        return nullptr;
 #endif
 }
 
 bool move_file(const std::string &from, const std::string &to)
 {
 #ifdef WIN32
-	TString TFrom = makeLongPath(from);
-	TString TTo = makeLongPath(to);
+        TString TFrom = makeLongPath(from);
+        TString TTo = makeLongPath(to);
 
-	return MoveFile(TFrom.c_str(), TTo.c_str());
+        return MoveFile(TFrom.c_str(), TTo.c_str());
+#elif defined(__APPLE__)
+        namespace fs = std::filesystem;
+
+        std::error_code ec;
+        fs::rename(from, to, ec);
+        if (!ec) {
+                return true;
+        }
+
+        if (ec == std::errc::cross_device_link) {
+                std::error_code copy_ec;
+                fs::create_directories(fs::path(to).parent_path(), copy_ec);
+                fs::copy_file(from, to, fs::copy_options::overwrite_existing,
+                              copy_ec);
+                if (!copy_ec) {
+                        std::error_code remove_ec;
+                        fs::remove(from, remove_ec);
+                        if (remove_ec) {
+                                obs_log(LOG_WARN,
+                                        "Failed to remove source file %s after copy: %s",
+                                        from.c_str(),
+                                        remove_ec.message().c_str());
+                        }
+                        return true;
+                }
+                obs_log(LOG_ERROR,
+                        "Failed to copy file from %s to %s: %s",
+                        from.c_str(), to.c_str(), copy_ec.message().c_str());
+                return false;
+        }
+
+        obs_log(LOG_ERROR, "Failed to move file from %s to %s: %s",
+                from.c_str(), to.c_str(), ec.message().c_str());
+        return false;
 #else
-#error "Unimplemented"
+        (void)from;
+        (void)to;
+        return false;
 #endif
 }
 
